@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.env
+venv/
+*.env # For .env file containing API keys
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Streamlit
+.streamlit/ # Streamlit local server cache and config
+
+# Dependencies
+# If you have large model files from sentence-transformers or other libraries
+# that are downloaded to a specific cache directory, you might need to add them here.
+# Example:
+# .cache/huggingface/
+# .cache/torch/
+
+# Operating System Files
+.DS_Store # macOS
+Thumbs.db # Windows
+
+# IDE specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Firebase service account key (if used and not in .env)
+# This is crucial for security if you downloaded a service account JSON.
+*.json # Be careful with this if you have other JSON files you DO want to track.
+# A more specific approach if your service account is named e.g., 'serviceAccountKey.json'
+# serviceAccountKey.json
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+

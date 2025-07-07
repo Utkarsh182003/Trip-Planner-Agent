@@ -1,0 +1,7 @@
+streamlit
+pydantic
+python-dotenv # For loading environment variables
+groq
+sentence-transformers # For generating embeddings
+scikit-learn # For cosine similarity (or numpy for manual calculation)
+tavily-python # New dependency for web search
