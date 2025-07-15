@@ -12,6 +12,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ipynb_checkpoints/
+.cache
 
 # Streamlit
 .streamlit/ # Streamlit local server cache and config

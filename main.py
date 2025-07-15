@@ -10,51 +10,101 @@ from rag_system import RAGSystem
 from knowledge_graph import KnowledgeGraph
 from web_search_tool import WebSearchTool
 from typing import List, Dict, Any, Optional, Callable
+from pydantic import ValidationError
+import unicodedata # Import unicodedata for advanced string normalization
+
+print("--- Starting main.py execution ---") # Debug print 1
 
 # --- Streamlit Page Configuration ---
 # This MUST be the first Streamlit command in your script.
 st.set_page_config(layout="wide", page_title="AI Travel Planner")
+print("Streamlit page config set.") # Debug print 2
 
 # Load environment variables from .env file
 load_dotenv()
+print(".env loaded.") # Debug print 3
 
 # --- API Key Checks (MUST be after st.set_page_config()) ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY not found in .env file. Please set it up.")
-    st.stop() # Stop the app if API key is missing
+    print("ERROR: GROQ_API_KEY not found. Stopping.") # Debug print 4
+    st.stop()
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 if not TAVILY_API_KEY:
     st.error("TAVILY_API_KEY not found in .env file. Please set it up.")
-    st.stop() # Stop the app if API key is missing
+    print("ERROR: TAVILY_API_KEY not found. Stopping.") # Debug print 5
+    st.stop()
+print("API keys checked.") # Debug print 6
 
 # --- Initialize Clients and Systems (using st.cache_resource for efficiency) ---
 
 # Initialize Groq client
 @st.cache_resource
 def get_groq_client(api_key: str):
+    print("Initializing Groq client...") # Debug print 7
     return Groq(api_key=api_key)
-client = get_groq_client(GROQ_API_KEY)
+try:
+    client = get_groq_client(GROQ_API_KEY)
+    print("Groq client initialized.") # Debug print 8
+except Exception as e:
+    print(f"CRITICAL ERROR: Failed to initialize Groq client: {e}") # Debug print
+    st.error(f"Failed to load Groq client. Please check API key and network. Error: {e}")
+    st.stop()
+
 
 # Initialize RAG System globally
 @st.cache_resource
 def load_rag_system():
-    return RAGSystem()
+    print("Initializing RAG System...") # Debug print 9
+    try:
+        # Explicitly set SENTENCE_TRANSFORMERS_HOME to a local cache directory
+        # This can help with model download issues.
+        local_cache_dir = os.path.join(os.getcwd(), '.cache', 'sentence_transformers')
+        os.makedirs(local_cache_dir, exist_ok=True)
+        os.environ['SENTENCE_TRANSFORMERS_HOME'] = local_cache_dir
+        print(f"Set SENTENCE_TRANSFORMERS_HOME to: {os.environ['SENTENCE_TRANSFORMERS_HOME']}") # Debug print
+
+        rag_sys = RAGSystem()
+        print("RAG System initialized successfully.") # Debug print 10
+        return rag_sys
+    except Exception as e:
+        print(f"CRITICAL ERROR: Failed to initialize RAGSystem: {e}") # Debug print
+        st.error(f"Failed to load RAG system. Please check dependencies (especially torch/transformers) and network. Error: {e}")
+        st.stop()
 rag_system = load_rag_system()
+
 
 # Initialize Knowledge Graph globally
 @st.cache_resource
 def load_knowledge_graph():
-    return KnowledgeGraph()
+    print("Initializing Knowledge Graph...") # Debug print 11
+    try:
+        kg_sys = KnowledgeGraph()
+        print("Knowledge Graph initialized successfully.") # Debug print 12
+        return kg_sys
+    except Exception as e:
+        print(f"CRITICAL ERROR: Failed to initialize KnowledgeGraph: {e}") # Debug print
+        st.error(f"Failed to load Knowledge Graph. Error: {e}")
+        st.stop()
 kg_system = load_knowledge_graph()
 
 # Initialize Web Search Tool globally
 @st.cache_resource
 def load_web_search_tool():
-    # WebSearchTool's __init__ will use os.getenv("TAVILY_API_KEY"), which we've already checked
-    return WebSearchTool()
+    print("Initializing Web Search Tool...") # Debug print 13
+    try:
+        web_tool = WebSearchTool()
+        print("Web Search Tool initialized successfully.") # Debug print 14
+        return web_tool
+    except Exception as e:
+        print(f"CRITICAL ERROR: Failed to initialize WebSearchTool: {e}") # Debug print
+        st.error(f"Failed to load Web Search Tool. Please check Tavily API key and network. Error: {e}")
+        st.stop()
 web_search_tool = load_web_search_tool()
+
+print("All systems initialized.") # Debug print 15
 
 
 # --- Tool Definitions for LLM ---
@@ -83,11 +133,7 @@ def kg_get_entity_info(entity_name: str) -> Optional[Dict[str, Any]]:
 def kg_find_attractions(city: str, interests: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """
     Finds attractions in a given city that match specified interests from the Knowledge Graph.
-    Args:
-        city (str): The city to search for attractions (e.g., "Paris").
-        interests (Optional[List[str]]): A list of user interests (e.g., ["History", "Art"]).
-    Returns:
-        List[Dict[str, Any]]: A list of dictionaries, each containing attraction details.
+    Returns a list of dictionaries with attraction details.
     """
     if interests is None:
         interests = []
@@ -174,7 +220,7 @@ tool_specs = [
 ]
 
 
-def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int = 7) -> str: # Increased iterations
+def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int = 7) -> str:
     """
     Runs the LLM, handling tool calls iteratively.
     """
@@ -247,6 +293,93 @@ def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int 
     st.warning("Max tool iterations reached. Could not get a final itinerary from LLM.")
     return "Could not generate a detailed itinerary after multiple tool calls."
 
+# --- JSON extraction and fixing helper functions ---
+def extract_json_from_output(output: str) -> str:
+    """
+    Extracts the largest JSON object from a string.
+    This helps if the LLM adds conversational text around the JSON.
+    """
+    stack = []
+    start = -1
+    end = -1
+    max_len = 0
+    
+    for i, char in enumerate(output):
+        if char == '{':
+            stack.append(i)
+        elif char == '}':
+            if stack:
+                current_start = stack.pop()
+                if not stack: # Found a complete top-level JSON object
+                    current_len = i - current_start + 1
+                    if current_len > max_len:
+                        max_len = current_len
+                        start = current_start
+                        end = i
+    
+    if start != -1 and end != -1:
+        return output[start : end + 1]
+    
+    # Fallback if no complete JSON object is found, try simple regex
+    match = re.search(r'\{.*\}', output, re.DOTALL)
+    if match:
+        return match.group(0)
+    return output
+
+def try_fix_json(json_str: str) -> str:
+    """
+    Attempts to fix common JSON issues and aggressively clean the string.
+    """
+    print(f"DEBUG (try_fix_json): Initial string (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+
+    # 1. Replace all forms of Unicode whitespace with a standard space
+    # This is crucial for handling non-breaking spaces and other invisible characters
+    # We will iterate through characters and replace any Unicode whitespace with a regular space
+    cleaned_chars = []
+    for char in json_str:
+        if unicodedata.category(char).startswith('Z'): # Zs (space separator), Zl (line separator), Zp (paragraph separator)
+            cleaned_chars.append(' ')
+        else:
+            cleaned_chars.append(char)
+    json_str = "".join(cleaned_chars)
+    print(f"DEBUG (try_fix_json): After Unicode whitespace replacement (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+
+    # 2. Strip all leading/trailing whitespace (now only standard spaces)
+    json_str = json_str.strip()
+    print(f"DEBUG (try_fix_json): After strip() (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+
+    # 3. Normalize Unicode characters and remove non-ASCII. This is a strong measure.
+    # It will convert accented characters (e.g., 'é' to 'e') and remove anything else non-ASCII.
+    # This step is critical if the LLM output contains non-standard characters that are not caught by whitespace replacement.
+    json_str = unicodedata.normalize('NFKD', json_str).encode('ascii', 'ignore').decode('ascii')
+    print(f"DEBUG (try_fix_json): After unicodedata normalize/ascii (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+
+    # 4. Remove trailing commas before } or ]
+    json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+    print(f"DEBUG (try_fix_json): After trailing comma fix (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+    
+    # 5. Remove any text after the last closing brace, assuming it's extraneous
+    last_brace_index = json_str.rfind('}')
+    if last_brace_index != -1:
+        json_str = json_str[:last_brace_index + 1]
+    print(f"DEBUG (try_fix_json): After extraneous text removal (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+    
+    # 6. Escape unescaped newlines and tabs within string values (basic)
+    # This should be done carefully as it can double-escape already escaped newlines.
+    # For now, let's assume the LLM might output raw newlines inside strings.
+    # This is less likely to be the root cause of "key must be a string at line 1 column 2"
+    # but important for overall JSON validity.
+    # json_str = json_str.replace('\n', '\\n').replace('\t', '\\t') 
+    # Re-evaluating this step: if the LLM is outputting valid JSON *but* with newlines inside string *values*,
+    # Pydantic's parser should handle it. If it's outputting newlines *outside* string values,
+    # the earlier stripping and regex should handle it. Let's remove this specific line for now to simplify.
+
+    # Final strip after all replacements, just in case
+    json_str = json_str.strip()
+    print(f"DEBUG (try_fix_json): Final string after all steps (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+    
+    return json_str
+
 
 def get_high_level_plan_from_llm(user_input: UserInput) -> str:
     """
@@ -288,15 +421,6 @@ def get_high_level_plan_from_llm(user_input: UserInput) -> str:
         st.error(f"Error generating high-level plan: {e}")
         return "Could not generate a high-level plan at this time."
 
-
-def extract_json_from_output(output: str) -> str:
-    """
-    Extracts the first JSON object from a string.
-    """
-    match = re.search(r'({.*})', output, re.DOTALL)
-    if match:
-        return match.group(1)
-    return output  # fallback
 
 def get_detailed_itinerary_with_tools(user_input: UserInput, high_level_outline: str,
                                        existing_itinerary: Optional[List[DailyItinerary]] = None,
@@ -391,22 +515,32 @@ def get_detailed_itinerary_with_tools(user_input: UserInput, high_level_outline:
     try:
         json_output = run_llm_with_tools(messages)
         st.info("Raw LLM output received. Attempting to parse...")
-        print("RAW LLM OUTPUT:", json_output)  # For debugging
+        print("RAW LLM OUTPUT:", json_output) # Print to terminal for debugging
 
-        # Try to extract JSON if extra text is present
+        # Attempt to extract and fix JSON
         json_output_clean = extract_json_from_output(json_output)
-        print("EXTRACTED JSON:", json_output_clean)  # For debugging
+        json_output_clean = try_fix_json(json_output_clean) # Apply the more aggressive fix
+        print("CLEANED JSON:", json_output_clean) # Print cleaned JSON to terminal
+        print(f"DEBUG: Length of cleaned JSON: {len(json_output_clean)}")
+        print(f"DEBUG: First 20 chars of cleaned JSON: '{json_output_clean[:20].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
+
 
         parsed_response = ItineraryResponse.model_validate_json(json_output_clean)
         parsed_response.itinerary.sort(key=lambda x: datetime.strptime(x.date, "%Y-%m-%d"))
+        
         return parsed_response.itinerary
 
     except json.JSONDecodeError as e:
         st.error(f"Error decoding JSON from LLM. This often means the LLM did not return valid JSON. Error: {e}. Raw LLM output: {json_output}")
         print(f"DEBUG: Raw LLM output that caused JSONDecodeError: {json_output}")
         return []
+    except ValidationError as e:
+        st.error(f"Pydantic Validation Error: The generated itinerary JSON does not match the expected structure. Details: {e.errors()}")
+        print(f"DEBUG: Pydantic Validation Error details: {e.errors()}")
+        print(f"DEBUG: JSON that failed validation: {json_output_clean}")
+        return []
     except Exception as e:
-        st.exception(f"An unexpected error occurred during Pydantic validation or LLM response processing: {e}")
+        st.exception(f"An unexpected error occurred during LLM response processing: {e}")
         return []
 
 
@@ -566,4 +700,3 @@ def app():
 
 if __name__ == "__main__":
     app()
-
