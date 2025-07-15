@@ -2,25 +2,40 @@
 import streamlit as st
 from models import UserInput, AgentState, TravelPlan, DailyItinerary, ItineraryItem, ItineraryResponse
 import json
-import os
+import os, re
 from dotenv import load_dotenv
 from groq import Groq
 from datetime import datetime, timedelta
 from rag_system import RAGSystem
 from knowledge_graph import KnowledgeGraph
 from web_search_tool import WebSearchTool
-from typing import List, Dict, Any, Optional, Callable # Import Callable for tool functions
+from typing import List, Dict, Any, Optional, Callable
+
+# --- Streamlit Page Configuration ---
+# This MUST be the first Streamlit command in your script.
+st.set_page_config(layout="wide", page_title="AI Travel Planner")
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Initialize Groq client
+# --- API Key Checks (MUST be after st.set_page_config()) ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY not found in .env file. Please set it up.")
-    st.stop()
+    st.stop() # Stop the app if API key is missing
 
-client = Groq(api_key=GROQ_API_KEY)
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+if not TAVILY_API_KEY:
+    st.error("TAVILY_API_KEY not found in .env file. Please set it up.")
+    st.stop() # Stop the app if API key is missing
+
+# --- Initialize Clients and Systems (using st.cache_resource for efficiency) ---
+
+# Initialize Groq client
+@st.cache_resource
+def get_groq_client(api_key: str):
+    return Groq(api_key=api_key)
+client = get_groq_client(GROQ_API_KEY)
 
 # Initialize RAG System globally
 @st.cache_resource
@@ -37,19 +52,12 @@ kg_system = load_knowledge_graph()
 # Initialize Web Search Tool globally
 @st.cache_resource
 def load_web_search_tool():
-    try:
-        return WebSearchTool()
-    except ValueError as e:
-        st.error(f"Web Search Tool Error: {e}. Please ensure TAVILY_API_KEY is set in your .env file.")
-        st.stop()
+    # WebSearchTool's __init__ will use os.getenv("TAVILY_API_KEY"), which we've already checked
+    return WebSearchTool()
 web_search_tool = load_web_search_tool()
-
-# --- Streamlit Page Configuration ---
-st.set_page_config(layout="wide", page_title="AI Travel Planner")
 
 
 # --- Tool Definitions for LLM ---
-# These functions will be exposed to the LLM
 def rag_retrieve(query: str) -> List[str]:
     """
     Retrieves relevant document snippets from a local knowledge base (RAG).
@@ -166,7 +174,7 @@ tool_specs = [
 ]
 
 
-def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int = 5) -> str:
+def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int = 7) -> str: # Increased iterations
     """
     Runs the LLM, handling tool calls iteratively.
     """
@@ -212,7 +220,7 @@ def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int 
                             "name": function_name,
                             "content": json.dumps(tool_response) if isinstance(tool_response, (dict, list)) else str(tool_response),
                         })
-                        st.write(f"Tool `{function_name}` output: {current_tool_outputs[-1]['content'][:200]}...") # Show snippet of tool output
+                        st.write(f"Tool `{function_name}` output: {current_tool_outputs[-1]['content'][:200]}...")
                     except Exception as tool_exec_e:
                         st.error(f"Error executing tool `{function_name}`: {tool_exec_e}")
                         current_tool_outputs.append({
@@ -230,8 +238,8 @@ def run_llm_with_tools(messages: List[Dict[str, Any]], max_tool_iterations: int 
                         "content": "Error: Unknown tool.",
                     })
             
-            messages.append(response_message) # Add the message that requested the tool call
-            tool_outputs.extend(current_tool_outputs) # Add the results of the tool calls
+            messages.append(response_message)
+            tool_outputs.extend(current_tool_outputs)
         else:
             # If no tool call, this is the final response
             return response_message.content
@@ -281,6 +289,15 @@ def get_high_level_plan_from_llm(user_input: UserInput) -> str:
         return "Could not generate a high-level plan at this time."
 
 
+def extract_json_from_output(output: str) -> str:
+    """
+    Extracts the first JSON object from a string.
+    """
+    match = re.search(r'({.*})', output, re.DOTALL)
+    if match:
+        return match.group(1)
+    return output  # fallback
+
 def get_detailed_itinerary_with_tools(user_input: UserInput, high_level_outline: str,
                                        existing_itinerary: Optional[List[DailyItinerary]] = None,
                                        refinement_request: Optional[str] = None) -> List[DailyItinerary]:
@@ -304,7 +321,6 @@ def get_detailed_itinerary_with_tools(user_input: UserInput, high_level_outline:
     if refinement_request:
         refinement_str = f"\n--- User Refinement Request ---\n{refinement_request}\n-------------------------------"
 
-    # Initial system message to set the context for the LLM
     system_message = {
         "role": "system",
         "content": f"""
@@ -349,7 +365,6 @@ def get_detailed_itinerary_with_tools(user_input: UserInput, high_level_outline:
         """
     }
 
-    # Initial user message
     user_message = {
         "role": "user",
         "content": f"""
@@ -374,20 +389,24 @@ def get_detailed_itinerary_with_tools(user_input: UserInput, high_level_outline:
     messages = [system_message, user_message]
 
     try:
-        json_output = run_llm_with_tools(messages) # Call our new tool-running function
-        
-        parsed_response = ItineraryResponse.model_validate_json(json_output)
+        json_output = run_llm_with_tools(messages)
+        st.info("Raw LLM output received. Attempting to parse...")
+        print("RAW LLM OUTPUT:", json_output)  # For debugging
+
+        # Try to extract JSON if extra text is present
+        json_output_clean = extract_json_from_output(json_output)
+        print("EXTRACTED JSON:", json_output_clean)  # For debugging
+
+        parsed_response = ItineraryResponse.model_validate_json(json_output_clean)
         parsed_response.itinerary.sort(key=lambda x: datetime.strptime(x.date, "%Y-%m-%d"))
-        
         return parsed_response.itinerary
 
     except json.JSONDecodeError as e:
         st.error(f"Error decoding JSON from LLM. This often means the LLM did not return valid JSON. Error: {e}. Raw LLM output: {json_output}")
-        # Print raw LLM output to console for debugging
         print(f"DEBUG: Raw LLM output that caused JSONDecodeError: {json_output}")
         return []
     except Exception as e:
-        st.error(f"Error generating detailed plan with tools or Pydantic validation: {e}")
+        st.exception(f"An unexpected error occurred during Pydantic validation or LLM response processing: {e}")
         return []
 
 
@@ -421,9 +440,11 @@ def app():
         submitted = st.form_submit_button("Plan My Trip")
         
     st.markdown("---")
-    if st.button("Start New Plan / Clear All"):
-        st.session_state.agent_state = None
-        st.rerun()
+    col_buttons = st.columns(2)
+    with col_buttons[0]:
+        if st.button("Start New Plan / Clear All"):
+            st.session_state.agent_state = None
+            st.rerun()
 
     if 'agent_state' not in st.session_state:
         st.session_state.agent_state = None
@@ -450,7 +471,9 @@ def app():
                 preferences=preferences if preferences else None
             )
 
-            st.session_state.agent_state = AgentState(user_input=user_input)
+            # Assign a dummy user_id since we removed Firebase Auth for HR demo
+            st.session_state['current_user_id'] = "hr_demo_user" 
+            st.session_state.agent_state = AgentState(user_id=st.session_state['current_user_id'], user_input=user_input)
 
             st.success("Travel request received and validated!")
 
@@ -469,11 +492,10 @@ def app():
 
                 st.info("Initiating detailed itinerary generation with dynamic tool use...")
 
-                # --- Phase 9: Generate Detailed Itinerary using LLM with Tool Calling ---
                 detailed_itinerary = get_detailed_itinerary_with_tools(
                     user_input, 
                     high_level_outline, 
-                    existing_itinerary=None, # No existing itinerary for initial generation
+                    existing_itinerary=None,
                     refinement_request=None
                 )
                 
@@ -521,7 +543,7 @@ def app():
                 refine_status_placeholder = st.empty()
                 with refine_status_placeholder.container():
                     st.info("Re-generating itinerary with your feedback using tools...")
-                    revised_itinerary = get_detailed_itinerary_with_tools( # Call the tool-enabled function
+                    revised_itinerary = get_detailed_itinerary_with_tools(
                         st.session_state.agent_state.user_input,
                         st.session_state.agent_state.travel_plan.high_level_outline,
                         existing_itinerary=st.session_state.agent_state.travel_plan.detailed_itinerary,
