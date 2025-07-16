@@ -310,7 +310,7 @@ def extract_json_from_output(output: str) -> str:
         elif char == '}':
             if stack:
                 current_start = stack.pop()
-                if not stack: # Found a complete top-level JSON object
+                if not stack:
                     current_len = i - current_start + 1
                     if current_len > max_len:
                         max_len = current_len
@@ -364,15 +364,6 @@ def try_fix_json(json_str: str) -> str:
         json_str = json_str[:last_brace_index + 1]
     print(f"DEBUG (try_fix_json): After extraneous text removal (len {len(json_str)}): '{json_str[:50].replace(' ', '<SPACE>').replace('\n', '<NEWLINE>')}'")
     
-    # 6. Escape unescaped newlines and tabs within string values (basic)
-    # This should be done carefully as it can double-escape already escaped newlines.
-    # For now, let's assume the LLM might output raw newlines inside strings.
-    # This is less likely to be the root cause of "key must be a string at line 1 column 2"
-    # but important for overall JSON validity.
-    # json_str = json_str.replace('\n', '\\n').replace('\t', '\\t') 
-    # Re-evaluating this step: if the LLM is outputting valid JSON *but* with newlines inside string *values*,
-    # Pydantic's parser should handle it. If it's outputting newlines *outside* string values,
-    # the earlier stripping and regex should handle it. Let's remove this specific line for now to simplify.
 
     # Final strip after all replacements, just in case
     json_str = json_str.strip()
